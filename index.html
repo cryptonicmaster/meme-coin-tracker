@@ -130,16 +130,24 @@
 
   /* new listings list */
   .listing{
-    display:flex; align-items:center; gap:14px; padding:12px 14px;
+    display:flex; align-items:center; flex-wrap:wrap; gap:12px 16px; padding:14px 16px;
     border:1px solid var(--line); border-radius:10px; background:var(--card); margin-bottom:8px;
   }
+  .listing .rank{ color:var(--muted); font-size:12px; width:26px; flex:0 0 auto; }
   .listing .badge{
     font-family:'Press Start 2P', monospace; font-size:8px; color:#0B0E14;
-    background: var(--lime); padding:5px 7px; border-radius:5px; white-space:nowrap;
+    background: var(--lime); padding:5px 7px; border-radius:5px; white-space:nowrap; flex:0 0 auto;
   }
-  .listing .lname{ font-weight:600; font-size:14px; flex:1; }
+  .listing .lname{ font-weight:600; font-size:14px; flex:1 1 160px; }
   .listing .lsym{ font-family:'JetBrains Mono', monospace; color:var(--muted); font-size:12px; }
-  .listing .ltime{ font-family:'JetBrains Mono', monospace; color:var(--cyan); font-size:11.5px; }
+  .listing .ltime{ font-family:'JetBrains Mono', monospace; color:var(--cyan); font-size:11.5px; flex:0 0 auto; }
+  .listing .pot-block{ flex:1 1 160px; min-width:150px; }
+  .listing .lstats{ font-family:'JetBrains Mono', monospace; color:var(--muted); font-size:11px; flex:1 1 220px; }
+  .listing .lsocial{
+    font-size:11.5px; color:var(--pink); text-decoration:none; white-space:nowrap; flex:0 0 auto;
+    border:1px solid var(--line); padding:4px 9px; border-radius:6px;
+  }
+  .listing .lsocial:hover{ border-color:var(--pink); }
 
   .empty, .loading{ color:var(--muted); font-size:13px; padding:20px 0; }
   .err{ color:var(--danger); font-size:12.5px; }
@@ -190,15 +198,18 @@
 
     <section>
       <div class="section-head">
-        <h2>🆕 FRESH LISTINGS</h2>
-        <p>Most recently added to CoinGecko — a proxy for newly-launched tokens</p>
+        <h2>🆕 FRESH LISTINGS LEADERBOARD</h2>
+        <p>Newest token profiles from DexScreener, ranked by a Potential Score</p>
       </div>
-      <div id="newList"><div class="loading mono">loading new listings…</div></div>
+      <div class="disclaimer" style="margin-bottom:16px;">
+        <b>Extremely high risk.</b> Brand-new tokens are the riskiest corner of crypto — most lose most of their value, and some are outright scams (rug pulls). Potential Score reflects early on-chain liquidity, trading activity, and whether the team filled in social links — it is <b>not</b> a quality or safety guarantee.
+      </div>
+      <div id="newList"><div class="loading mono">loading fresh listings…</div></div>
     </section>
   </main>
 
   <footer>
-    Data: CoinGecko public API. Auto-refreshes every 60s. Hype Score = weighted blend of 1h/24h price momentum, 24h volume-to-market-cap ratio, and trending rank — capped 0–100. Social Presence = average of Twitter followers, Reddit subscribers/activity, and Telegram members, each scaled against a follower-count benchmark and capped 0–100% — it measures audience size and activity, not sentiment or quality. Not investment advice.
+    Data: CoinGecko (trending, hype scores, social) + DexScreener (fresh listings) public APIs, both free and keyless. Auto-refreshes every 60s. Hype Score = weighted blend of 1h/24h price momentum, 24h volume-to-market-cap ratio, and trending rank — capped 0–100. Social Presence = average of Twitter followers, Reddit subscribers/activity, and Telegram members, scaled against a follower-count benchmark, capped 0–100%. Potential Score (fresh listings) = weighted blend of on-chain liquidity depth, 24h trading turnover, price momentum, and whether social links were provided — capped 0–100. None of these scores predict price or guarantee legitimacy. Brand-new tokens carry very high risk of loss, including scams. Not investment advice.
   </footer>
 
 <script>
@@ -373,27 +384,90 @@ async function loadSocialScores(coinIds){
   }
 }
 
+const DEX = 'https://api.dexscreener.com';
+
+// Potential Score: how much early on-chain traction a brand-new token has.
+// NOT a price prediction — just liquidity depth, trading turnover, momentum,
+// and whether the team bothered to fill in social links.
+function potentialScore(profile, pair){
+  if(!pair) return 0;
+  const liq = pair.liquidity?.usd || 0;
+  const vol = pair.volume?.h24 || 0;
+  const mcap = pair.marketCap || pair.fdv || 0;
+  const chg24 = pair.priceChange?.h24 || 0;
+  const turnover = mcap > 0 ? vol / mcap : (liq > 0 ? Math.min(1, vol / (liq * 5)) : 0);
+
+  const liqScore = Math.min(1, liq / 100000);          // $100k+ liquidity = full marks
+  const turnoverScore = Math.min(1, turnover / 1.5);    // healthy daily turnover
+  const momentumScore = Math.max(0, Math.min(1, (chg24 + 50) / 150)); // -50%..+100% mapped to 0..1
+  const socialBonus = (profile.links && profile.links.length > 0) ? 1 : 0;
+
+  const score = liqScore*35 + turnoverScore*30 + momentumScore*20 + socialBonus*15;
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
 async function loadNewListings(){
   const el = document.getElementById('newList');
   try{
-    const data = await fetchJSON(`${API}/coins/list/new`);
-    const items = (data || []).slice(0, 12);
-    if(!items.length){ el.innerHTML = '<div class="empty">No recent listings found.</div>'; return; }
+    const profiles = await fetchJSON(`${DEX}/token-profiles/latest/v1`);
+    const items = (profiles || []).filter(p => p.tokenAddress && p.chainId).slice(0, 18);
+    if(!items.length){ el.innerHTML = '<div class="empty">No fresh listings found right now.</div>'; return; }
 
-    el.innerHTML = items.map(c => {
-      const when = c.activated_at ? new Date(c.activated_at * 1000) : null;
-      const ago = when ? timeAgo(when) : 'unknown time';
+    // Batch pair lookups by chain (DexScreener allows up to 30 addresses per call)
+    const byChain = {};
+    items.forEach(p => { (byChain[p.chainId] = byChain[p.chainId] || []).push(p.tokenAddress); });
+
+    const pairMap = {};
+    await Promise.all(Object.entries(byChain).map(async ([chainId, addresses]) => {
+      try{
+        const addrList = addresses.slice(0,30).join(',');
+        const res = await fetchJSON(`${DEX}/latest/dex/tokens/${addrList}`);
+        const pairs = (res && res.pairs) || (Array.isArray(res) ? res : []) || [];
+        pairs.forEach(pair => {
+          const addr = (pair.baseToken && pair.baseToken.address || '').toLowerCase();
+          if(!addr) return;
+          const existing = pairMap[addr];
+          if(!existing || (pair.liquidity?.usd||0) > (existing.liquidity?.usd||0)) pairMap[addr] = pair;
+        });
+      }catch(e){ /* skip this chain's batch, keep the rest */ }
+    }));
+
+    const rows = items.map(p => {
+      const pair = pairMap[(p.tokenAddress||'').toLowerCase()];
+      return { p, pair, score: potentialScore(p, pair) };
+    }).sort((a,b) => b.score - a.score);
+
+    el.innerHTML = rows.map(({p, pair, score}, i) => {
+      const name = (pair && pair.baseToken && pair.baseToken.name) || p.header || 'Unknown token';
+      const symbol = pair && pair.baseToken && pair.baseToken.symbol;
+      const age = pair && pair.pairCreatedAt ? timeAgo(new Date(pair.pairCreatedAt)) : 'age unknown';
+      const liq = pair && pair.liquidity ? pair.liquidity.usd : null;
+      const vol = pair && pair.volume ? pair.volume.h24 : null;
+      const chg = pair && pair.priceChange ? pair.priceChange.h24 : null;
+      const hasSocials = (p.links || []).length > 0;
+      const statBits = [
+        liq != null ? 'Liq ' + fmtCompact(liq) : null,
+        vol != null ? 'Vol ' + fmtCompact(vol) : null,
+        chg != null ? chgText(chg) : null,
+      ].filter(Boolean).join(' · ') || 'no pair data yet';
+
       return `
         <div class="listing">
-          <span class="badge">NEW</span>
-          <span class="lname">${c.name || c.id}</span>
-          <span class="lsym">${(c.symbol||'').toUpperCase()}</span>
-          <span class="ltime">${ago}</span>
+          <span class="rank mono">#${i+1}</span>
+          <span class="badge">${(p.chainId||'?').toUpperCase()}</span>
+          <span class="lname">${name}${symbol ? ` <span class="lsym">${symbol.toUpperCase()}</span>` : ''}</span>
+          <span class="ltime">${age}</span>
+          <div class="pot-block">
+            <div class="meter-label"><span>POTENTIAL</span><span>${score}/100</span></div>
+            <div class="meter">${meterHtml(score)}</div>
+          </div>
+          <span class="lstats">${statBits}</span>
+          <a class="lsocial" href="${p.url}" target="_blank" rel="noopener">${hasSocials ? '🔗 socials' : 'view →'}</a>
         </div>
       `;
     }).join('');
   }catch(e){
-    el.innerHTML = `<div class="err">Couldn't load new listings (${e.message}). This endpoint is sometimes rate-limited — will retry.</div>`;
+    el.innerHTML = `<div class="err">Couldn't load fresh listings (${e.message}). Will retry next cycle.</div>`;
   }
 }
 
