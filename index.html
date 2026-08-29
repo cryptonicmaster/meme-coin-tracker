@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DEGEN RADAR — Meme Coin Tracker</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+  :root{
+    --bg: #0B0E14;
+    --card: #141824;
+    --card-2: #181D2B;
+    --line: #262C3D;
+    --pink: #FF4D8D;
+    --lime: #C6FF3D;
+    --cyan: #3DDFFF;
+    --text: #E8ECF1;
+    --muted: #7A8296;
+    --danger: #FF5C5C;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background: var(--bg);
+    color: var(--text);
+    font-family:'Space Grotesk', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .pixel{ font-family:'Press Start 2P', monospace; }
+  .mono{ font-family:'JetBrains Mono', monospace; }
+
+  /* ---- Ticker ---- */
+  .ticker-wrap{
+    overflow:hidden;
+    background: linear-gradient(90deg, var(--card-2), var(--card));
+    border-bottom:1px solid var(--line);
+    padding:10px 0;
+    white-space:nowrap;
+  }
+  .ticker{
+    display:inline-block;
+    animation: scroll 28s linear infinite;
+    font-family:'JetBrains Mono', monospace;
+    font-size:13px;
+  }
+  .ticker span{ margin-right:36px; color:var(--muted); }
+  .ticker b{ color:var(--text); }
+  .up{ color: var(--lime); }
+  .down{ color: var(--danger); }
+  @keyframes scroll{ 0%{transform:translateX(0);} 100%{transform:translateX(-50%);} }
+
+  /* ---- Header ---- */
+  header{
+    max-width:1100px; margin:0 auto; padding:48px 20px 24px;
+  }
+  .eyebrow{
+    font-size:11px; letter-spacing:.12em; color:var(--pink); margin-bottom:14px;
+  }
+  h1{
+    font-family:'Press Start 2P', monospace;
+    font-size: clamp(22px, 4.4vw, 38px);
+    line-height:1.5;
+    margin:0 0 16px;
+    color:var(--text);
+    text-shadow: 3px 3px 0 rgba(255,77,141,.25);
+  }
+  .sub{ color:var(--muted); max-width:640px; font-size:14.5px; line-height:1.6; }
+  .disclaimer{
+    margin-top:18px; padding:12px 14px; border:1px dashed var(--line);
+    border-radius:8px; font-size:12.5px; color:var(--muted); background:rgba(255,255,255,0.02);
+  }
+  .disclaimer b{ color:var(--cyan); }
+
+  .status-row{
+    max-width:1100px; margin:0 auto; padding:0 20px 8px;
+    display:flex; align-items:center; gap:10px; font-size:12px; color:var(--muted);
+  }
+  .dot{ width:7px; height:7px; border-radius:50%; background:var(--lime); box-shadow:0 0 8px var(--lime); animation: pulse 1.8s infinite; }
+  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:.35;} }
+  button.refresh{
+    background:var(--card-2); border:1px solid var(--line); color:var(--text);
+    font-family:'JetBrains Mono', monospace; font-size:11px; padding:6px 12px;
+    border-radius:6px; cursor:pointer; margin-left:auto;
+  }
+  button.refresh:hover{ border-color:var(--pink); color:var(--pink); }
+
+  main{ max-width:1100px; margin:0 auto; padding:20px; }
+
+  section{ margin-bottom:48px; }
+  .section-head{
+    display:flex; align-items:baseline; gap:12px; margin-bottom:18px;
+    border-bottom:1px solid var(--line); padding-bottom:10px;
+  }
+  .section-head h2{
+    font-family:'Press Start 2P', monospace; font-size:13px; margin:0; color:var(--lime);
+  }
+  .section-head p{ margin:0; font-size:12px; color:var(--muted); }
+
+  .grid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(260px,1fr)); gap:14px; }
+
+  .card{
+    background: var(--card); border:1px solid var(--line); border-radius:12px; padding:16px;
+    transition: border-color .15s ease, transform .15s ease;
+  }
+  .card:hover{ border-color:var(--pink); transform: translateY(-2px); }
+  .card-top{ display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+  .card-top img{ width:28px; height:28px; border-radius:50%; background:#000; }
+  .card-top .name{ font-weight:700; font-size:14.5px; }
+  .card-top .sym{ font-family:'JetBrains Mono', monospace; color:var(--muted); font-size:12px; }
+
+  .price-row{ display:flex; justify-content:space-between; align-items:baseline; margin:8px 0 12px; }
+  .price{ font-family:'JetBrains Mono', monospace; font-size:16px; font-weight:600; }
+  .chg{ font-family:'JetBrains Mono', monospace; font-size:12.5px; padding:2px 7px; border-radius:5px; }
+  .chg.up{ background: rgba(198,255,61,0.12); }
+  .chg.down{ background: rgba(255,92,92,0.12); }
+
+  .meter-label{ display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-bottom:5px; }
+  .meter{
+    height:10px; border-radius:5px; background:var(--card-2); overflow:hidden; display:flex; gap:2px; padding:2px;
+    border:1px solid var(--line);
+  }
+  .meter .seg{ flex:1; border-radius:1px; background:#232838; }
+  .meter .seg.on{ background: linear-gradient(90deg, var(--cyan), var(--lime)); }
+  .meter.social .seg.on{ background: linear-gradient(90deg, var(--pink), var(--cyan)); }
+  .meter-block{ margin-top:10px; }
+  .social-note{ font-size:10.5px; color:var(--muted); margin-top:4px; }
+
+  .stats{ display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-top:10px; font-family:'JetBrains Mono', monospace; }
+
+  /* new listings list */
+  .listing{
+    display:flex; align-items:center; gap:14px; padding:12px 14px;
+    border:1px solid var(--line); border-radius:10px; background:var(--card); margin-bottom:8px;
+  }
+  .listing .badge{
+    font-family:'Press Start 2P', monospace; font-size:8px; color:#0B0E14;
+    background: var(--lime); padding:5px 7px; border-radius:5px; white-space:nowrap;
+  }
+  .listing .lname{ font-weight:600; font-size:14px; flex:1; }
+  .listing .lsym{ font-family:'JetBrains Mono', monospace; color:var(--muted); font-size:12px; }
+  .listing .ltime{ font-family:'JetBrains Mono', monospace; color:var(--cyan); font-size:11.5px; }
+
+  .empty, .loading{ color:var(--muted); font-size:13px; padding:20px 0; }
+  .err{ color:var(--danger); font-size:12.5px; }
+
+  footer{ max-width:1100px; margin:0 auto; padding:20px 20px 60px; color:var(--muted); font-size:11.5px; border-top:1px solid var(--line); }
+
+  @media (max-width:520px){
+    h1{ font-size:18px; }
+    .grid{ grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+  <div class="ticker-wrap"><div class="ticker" id="tickerText"><span>Loading ticker…</span></div></div>
+
+  <header>
+    <div class="eyebrow pixel">// DEGEN RADAR</div>
+    <h1>MEME COIN<br/>TRACKER</h1>
+    <p class="sub">Live hype scores for trending meme coins, plus a feed of tokens most recently listed on CoinGecko — the closest thing to a real-time "launch" signal available from public data.</p>
+    <div class="disclaimer">
+      <b>Heuristic, not a prediction.</b> The Hype Score is a rules-based blend of momentum and volume — it does not forecast price, and it is not financial advice. Meme coins are extremely volatile and high-risk; most go to zero. Do your own research.
+    </div>
+  </header>
+
+  <div class="status-row">
+    <span class="dot"></span>
+    <span id="statusText" class="mono">connecting…</span>
+    <button class="refresh" onclick="loadAll(true)">↻ refresh now</button>
+  </div>
+
+  <main>
+    <section>
+      <div class="section-head">
+        <h2>🔥 TRENDING</h2>
+        <p>Right now on CoinGecko, ranked by search interest</p>
+      </div>
+      <div class="grid" id="trendingGrid"><div class="loading mono">loading trending coins…</div></div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>⚡ HYPE SCORES</h2>
+        <p>Top meme-token category coins by 24h volume, scored 0–100</p>
+      </div>
+      <div class="grid" id="scoreGrid"><div class="loading mono">loading market data…</div></div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>🆕 FRESH LISTINGS</h2>
+        <p>Most recently added to CoinGecko — a proxy for newly-launched tokens</p>
+      </div>
+      <div id="newList"><div class="loading mono">loading new listings…</div></div>
+    </section>
+  </main>
+
+  <footer>
+    Data: CoinGecko public API. Auto-refreshes every 60s. Hype Score = weighted blend of 1h/24h price momentum, 24h volume-to-market-cap ratio, and trending rank — capped 0–100. Social Presence = average of Twitter followers, Reddit subscribers/activity, and Telegram members, each scaled against a follower-count benchmark and capped 0–100% — it measures audience size and activity, not sentiment or quality. Not investment advice.
+  </footer>
+
+<script>
+const API = 'https://api.coingecko.com/api/v3';
+let refreshTimer = null;
+
+function fmtPrice(p){
+  if(p == null) return '—';
+  if(p < 0.01) return '$' + p.toFixed(8);
+  if(p < 1) return '$' + p.toFixed(4);
+  return '$' + p.toLocaleString(undefined,{maximumFractionDigits:2});
+}
+function fmtCompact(n){
+  if(n == null) return '—';
+  return '$' + Intl.NumberFormat('en',{notation:'compact', maximumFractionDigits:1}).format(n);
+}
+function chgClass(v){ return v >= 0 ? 'up' : 'down'; }
+function chgText(v){ if(v==null) return '—'; return (v>=0?'+':'') + v.toFixed(2) + '%'; }
+
+function hypeScore({ pct1h, pct24h, volMcapRatio, trendingBonus }){
+  const norm = (v, cap) => Math.max(-1, Math.min(1, (v||0)/cap));
+  let score = 0;
+  score += (norm(pct24h, 40) * 0.5 + 0.5) * 35;      // 24h momentum, weight 35
+  score += (norm(pct1h, 10) * 0.5 + 0.5) * 15;        // 1h momentum, weight 15
+  score += Math.min(1, (volMcapRatio||0) / 0.6) * 35; // liquidity/turnover, weight 35
+  score += trendingBonus;                             // up to 15
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function meterHtml(score){
+  const total = 12;
+  const on = Math.round((score/100)*total);
+  let segs = '';
+  for(let i=0;i<total;i++) segs += `<div class="seg ${i<on?'on':''}"></div>`;
+  return segs;
+}
+
+async function fetchJSON(url){
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
+
+async function loadTrending(){
+  const el = document.getElementById('trendingGrid');
+  const tickerEl = document.getElementById('tickerText');
+  try{
+    const data = await fetchJSON(`${API}/search/trending`);
+    const coins = (data.coins || []).slice(0,10).map(c => c.item);
+    if(!coins.length){ el.innerHTML = '<div class="empty">No trending data right now.</div>'; return []; }
+
+    el.innerHTML = coins.map(c => `
+      <div class="card">
+        <div class="card-top">
+          <img src="${c.thumb}" onerror="this.style.display='none'"/>
+          <div>
+            <div class="name">${c.name}</div>
+            <div class="sym">${c.symbol.toUpperCase()} · rank #${c.market_cap_rank ?? '—'}</div>
+          </div>
+        </div>
+        <div class="stats">
+          <span>BTC price</span>
+          <span>${c.price_btc ? c.price_btc.toFixed(10) : '—'}</span>
+        </div>
+        <div class="stats">
+          <span>Trending score</span>
+          <span>#${(c.score ?? 0) + 1} on CoinGecko</span>
+        </div>
+      </div>
+    `).join('');
+
+    tickerEl.innerHTML = coins.concat(coins).map(c =>
+      `<span><b>${c.symbol.toUpperCase()}</b> — ${c.name}</span>`
+    ).join('');
+
+    return coins.map(c => c.symbol.toLowerCase());
+  }catch(e){
+    el.innerHTML = `<div class="err">Couldn't load trending coins (${e.message}). Retrying next cycle.</div>`;
+    return [];
+  }
+}
+
+async function loadScores(trendingSymbols){
+  const el = document.getElementById('scoreGrid');
+  try{
+    const data = await fetchJSON(`${API}/coins/markets?vs_currency=usd&category=meme-token&order=volume_desc&per_page=15&page=1&sparkline=false&price_change_percentage=1h,24h`);
+    if(!data.length){ el.innerHTML = '<div class="empty">No meme-token market data available.</div>'; return; }
+
+    const rows = data.map(c => {
+      const pct1h = c.price_change_percentage_1h_in_currency;
+      const pct24h = c.price_change_percentage_24h_in_currency ?? c.price_change_percentage_24h;
+      const volMcapRatio = c.market_cap ? (c.total_volume / c.market_cap) : 0;
+      const trendingBonus = trendingSymbols.includes(c.symbol.toLowerCase()) ? 15 : 0;
+      const score = hypeScore({ pct1h, pct24h, volMcapRatio, trendingBonus });
+      return { c, score, pct1h, pct24h };
+    }).sort((a,b) => b.score - a.score);
+
+    el.innerHTML = rows.map(({c, score, pct1h, pct24h}) => `
+      <div class="card" id="card-${c.id}">
+        <div class="card-top">
+          <img src="${c.image}" onerror="this.style.display='none'"/>
+          <div>
+            <div class="name">${c.name}</div>
+            <div class="sym">${c.symbol.toUpperCase()}</div>
+          </div>
+        </div>
+        <div class="price-row">
+          <span class="price">${fmtPrice(c.current_price)}</span>
+          <span class="chg ${chgClass(pct24h)}">${chgText(pct24h)}</span>
+        </div>
+        <div class="meter-block">
+          <div class="meter-label"><span>HYPE SCORE</span><span>${score}/100</span></div>
+          <div class="meter">${meterHtml(score)}</div>
+        </div>
+        <div class="meter-block" id="social-${c.id}">
+          <div class="meter-label"><span>SOCIAL PRESENCE</span><span class="social-value">…</span></div>
+          <div class="meter social">${meterHtml(0)}</div>
+          <div class="social-note">checking Twitter/Reddit/Telegram…</div>
+        </div>
+        <div class="stats">
+          <span>1h ${chgText(pct1h)}</span>
+          <span>Vol ${fmtCompact(c.total_volume)}</span>
+          <span>MCap ${fmtCompact(c.market_cap)}</span>
+        </div>
+      </div>
+    `).join('');
+
+    loadSocialScores(rows.map(r => r.c.id));
+  }catch(e){
+    el.innerHTML = `<div class="err">Couldn't load market data (${e.message}). Retrying next cycle.</div>`;
+  }
+}
+
+// Fetches community/social data one coin at a time (spaced out to respect
+// CoinGecko's free-tier rate limit) and fills in each card as results arrive.
+async function loadSocialScores(coinIds){
+  for(const id of coinIds){
+    try{
+      const data = await fetchJSON(`${API}/coins/${id}?localization=false&tickers=false&market_data=false&community_data=true&developer_data=false&sparkline=false`);
+      const cd = data.community_data || {};
+      const metrics = [
+        { val: cd.twitter_followers, cap: 300000, label: 'Twitter' },
+        { val: cd.reddit_subscribers, cap: 150000, label: 'Reddit' },
+        { val: cd.telegram_channel_user_count, cap: 100000, label: 'Telegram' },
+        { val: cd.reddit_accounts_active_48h, cap: 5000, label: 'Reddit activity' },
+      ].filter(m => typeof m.val === 'number' && m.val > 0);
+
+      const container = document.getElementById(`social-${id}`);
+      if(!container) continue;
+
+      if(!metrics.length){
+        container.querySelector('.social-value').textContent = 'n/a';
+        container.querySelector('.social-note').textContent = 'no public follower data found';
+        continue;
+      }
+
+      const pct = metrics.reduce((sum,m) => sum + Math.min(1, m.val/m.cap), 0) / metrics.length;
+      const score = Math.round(pct * 100);
+      container.querySelector('.social-value').textContent = score + '%';
+      container.querySelector('.meter').innerHTML = meterHtml(score);
+      container.querySelector('.social-note').textContent = metrics.map(m =>
+        `${m.label} ${Intl.NumberFormat('en',{notation:'compact'}).format(m.val)}`
+      ).join(' · ');
+    }catch(e){
+      const container = document.getElementById(`social-${id}`);
+      if(container){
+        container.querySelector('.social-value').textContent = '—';
+        container.querySelector('.social-note').textContent = 'social data unavailable';
+      }
+    }
+    await new Promise(r => setTimeout(r, 1500)); // stay under free API rate limit
+  }
+}
+
+async function loadNewListings(){
+  const el = document.getElementById('newList');
+  try{
+    const data = await fetchJSON(`${API}/coins/list/new`);
+    const items = (data || []).slice(0, 12);
+    if(!items.length){ el.innerHTML = '<div class="empty">No recent listings found.</div>'; return; }
+
+    el.innerHTML = items.map(c => {
+      const when = c.activated_at ? new Date(c.activated_at * 1000) : null;
+      const ago = when ? timeAgo(when) : 'unknown time';
+      return `
+        <div class="listing">
+          <span class="badge">NEW</span>
+          <span class="lname">${c.name || c.id}</span>
+          <span class="lsym">${(c.symbol||'').toUpperCase()}</span>
+          <span class="ltime">${ago}</span>
+        </div>
+      `;
+    }).join('');
+  }catch(e){
+    el.innerHTML = `<div class="err">Couldn't load new listings (${e.message}). This endpoint is sometimes rate-limited — will retry.</div>`;
+  }
+}
+
+function timeAgo(date){
+  const s = Math.floor((Date.now() - date.getTime())/1000);
+  if(s < 60) return s + 's ago';
+  if(s < 3600) return Math.floor(s/60) + 'm ago';
+  if(s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}
+
+async function loadAll(manual){
+  const statusEl = document.getElementById('statusText');
+  statusEl.textContent = manual ? 'refreshing…' : 'auto-refreshing…';
+  try{
+    const trendingSymbols = await loadTrending();
+    await Promise.all([ loadScores(trendingSymbols), loadNewListings() ]);
+    statusEl.textContent = 'live · last updated ' + new Date().toLocaleTimeString();
+  }catch(e){
+    statusEl.textContent = 'error refreshing — will retry';
+  }
+}
+
+loadAll(false);
+if(refreshTimer) clearInterval(refreshTimer);
+refreshTimer = setInterval(() => loadAll(false), 60000);
+</script>
+</body>
+</html>
