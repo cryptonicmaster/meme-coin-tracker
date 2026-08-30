@@ -267,10 +267,19 @@ function meterHtml(score){
   return segs;
 }
 
-async function fetchJSON(url){
-  const res = await fetch(url);
-  if(!res.ok) throw new Error('HTTP ' + res.status);
-  return res.json();
+async function fetchJSON(url, timeoutMs = 12000){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try{
+    const res = await fetch(url, { signal: controller.signal });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    return await res.json();
+  }catch(e){
+    if(e.name === 'AbortError') throw new Error('timed out after ' + (timeoutMs/1000) + 's');
+    throw e;
+  }finally{
+    clearTimeout(timer);
+  }
 }
 
 async function loadTrending(){
@@ -459,7 +468,7 @@ async function loadNewListings(){
     await Promise.all(Object.entries(byChain).map(async ([chainId, addresses]) => {
       try{
         const addrList = addresses.slice(0,30).join(',');
-        const res = await fetchJSON(`${DEX}/latest/dex/tokens/${addrList}`);
+        const res = await fetchJSON(`${DEX}/tokens/v1/${chainId}/${addrList}`);
         const pairs = (res && res.pairs) || (Array.isArray(res) ? res : []) || [];
         pairs.forEach(pair => {
           const addr = (pair.baseToken && pair.baseToken.address || '').toLowerCase();
@@ -555,7 +564,7 @@ async function loadAll(manual){
     await Promise.all([ loadScores(trendingSymbols), loadNewListings() ]);
     statusEl.textContent = 'live · last updated ' + new Date().toLocaleTimeString();
   }catch(e){
-    statusEl.textContent = 'error refreshing — will retry';
+    statusEl.textContent = 'error (' + e.message + ') — retrying in 60s';
   }
 }
 
