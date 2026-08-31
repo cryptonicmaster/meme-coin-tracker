@@ -138,6 +138,7 @@
     font-family:'Press Start 2P', monospace; font-size:8px; color:#0B0E14;
     background: var(--lime); padding:5px 7px; border-radius:5px; white-space:nowrap; flex:0 0 auto;
   }
+  .listing .badge.live{ background: var(--pink); animation: pulse 1.4s infinite; }
   .listing .lname{ font-weight:600; font-size:14px; flex:1 1 160px; }
   .listing .lsym{ font-family:'JetBrains Mono', monospace; color:var(--muted); font-size:12px; }
   .listing .ltime{ font-family:'JetBrains Mono', monospace; color:var(--cyan); font-size:11.5px; flex:0 0 auto; }
@@ -225,6 +226,18 @@
       </div>
       <div id="hiddenNote" class="social-note" style="margin-bottom:10px;"></div>
       <div id="newList"><div class="loading mono">loading fresh listings…</div></div>
+    </section>
+
+    <section>
+      <div class="section-head" style="flex-wrap:wrap;">
+        <h2>🔴 LIVE ON-CHAIN LAUNCHES</h2>
+        <p style="flex:1 1 auto;">Solana / pump.fun tokens, streamed the moment they're created — before any DEX profile exists</p>
+      </div>
+      <div class="disclaimer" style="margin-bottom:10px; border-color:var(--danger);">
+        <b style="color:var(--danger);">Extreme risk — read before using this section.</b> These tokens can be seconds old with zero trading history, zero liquidity checks, and no track record whatsoever. Most fail or are outright scams. The <b>Early Signal Score</b> here is far weaker than the Potential Score above — it's based only on whether the creator filled in socials and put any of their own money in, not on any real trading data (there isn't any yet). This feed also runs on an <b>unofficial third-party relay</b>, not pump.fun itself — it can go down or misbehave without notice.
+      </div>
+      <div id="onchainStatus" class="social-note mono" style="margin-bottom:10px;">connecting to live feed…</div>
+      <div id="onchainList"><div class="loading mono">waiting for the first live launch…</div></div>
     </section>
   </main>
 
@@ -571,6 +584,127 @@ async function loadAll(manual){
 loadAll(false);
 if(refreshTimer) clearInterval(refreshTimer);
 refreshTimer = setInterval(() => loadAll(false), 60000);
+
+/* ---------------------------------------------------------------------
+   LIVE ON-CHAIN LAUNCHES (pump.fun via an unofficial third-party relay)
+   This is NOT an official pump.fun API — field names below are a
+   best-effort guess based on public docs for the relay, and may need
+   adjusting once tested against the live feed. All rendered text is
+   HTML-escaped and the mint address is validated before being used in
+   a link, since this data comes directly from anonymous on-chain users.
+--------------------------------------------------------------------- */
+const ONCHAIN_WS_URL = 'wss://pumpdev.io/ws';
+const ONCHAIN_MAX = 20;
+const SOLANA_ADDR_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/; // base58, no 0/O/I/l
+
+let onchainTokens = [];
+let onchainReconnectTimer = null;
+
+function escapeHtml(str){
+  const d = document.createElement('div');
+  d.textContent = str == null ? '' : String(str);
+  return d.innerHTML;
+}
+
+function normalizeOnchainToken(data){
+  // Defensive: this relay's exact schema isn't independently verified here,
+  // so we check several plausible field names and bail out cleanly if we
+  // can't find a mint address (i.e. this message probably wasn't a new-token event).
+  const mint = data.mint || data.address || data.tokenAddress || data.mintAddress;
+  if(!mint || typeof mint !== 'string') return null;
+
+  const name = data.name || data.tokenName || 'Unknown token';
+  const symbol = data.symbol || data.ticker || '';
+  const twitter = data.twitter || (data.links && data.links.twitter);
+  const telegram = data.telegram || (data.links && data.links.telegram);
+  const website = data.website || (data.links && data.links.website);
+  const hasSocials = !!(twitter || telegram || website);
+  const devBuySol = Number(data.initialBuy || data.devBuySol || data.solAmount || 0) || 0;
+
+  // Early Signal Score: intentionally conservative given near-zero data.
+  // Socials filled in = some effort beyond a one-click mint. A dev buy shows
+  // the creator put some of their own money in — capped low since a big dev
+  // buy can also be a red flag (bigger dump potential), not just a good sign.
+  let score = 15; // baseline for existing as a structured, named token at all
+  score += hasSocials ? 55 : 0;
+  score += Math.min(30, devBuySol * 6);
+  score = Math.max(0, Math.min(100, Math.round(score)));
+
+  return { mint: String(mint), name, symbol, hasSocials, devBuySol, score, ts: Date.now() };
+}
+
+function renderOnchainList(){
+  const el = document.getElementById('onchainList');
+  if(!onchainTokens.length){
+    el.innerHTML = '<div class="loading mono">waiting for the first live launch…</div>';
+    return;
+  }
+  el.innerHTML = onchainTokens.map(t => {
+    const validMint = SOLANA_ADDR_RE.test(t.mint);
+    const link = validMint
+      ? `<a class="lsocial" href="https://pump.fun/${encodeURIComponent(t.mint)}" target="_blank" rel="noopener">view →</a>`
+      : '';
+    return `
+      <div class="listing">
+        <span class="badge live">LIVE</span>
+        <span class="lname">${escapeHtml(t.name)}${t.symbol ? ` <span class="lsym">${escapeHtml(t.symbol.toUpperCase())}</span>` : ''}</span>
+        <span class="ltime">${timeAgo(new Date(t.ts))}</span>
+        <div class="pot-block">
+          <div class="meter-label"><span>EARLY SIGNAL</span><span>${t.score}/100</span></div>
+          <div class="meter social">${meterHtml(t.score)}</div>
+        </div>
+        <div class="flags">
+          <span class="flag ${t.hasSocials ? 'ok' : 'warn'}">${t.hasSocials ? '✓ Socials linked' : '✕ No socials'}</span>
+          <span class="flag warn">⚠ Zero track record</span>
+        </div>
+        ${link}
+      </div>
+    `;
+  }).join('');
+}
+
+function connectOnchainFeed(){
+  const statusEl = document.getElementById('onchainStatus');
+  let ws;
+  try{
+    ws = new WebSocket(ONCHAIN_WS_URL);
+  }catch(e){
+    statusEl.textContent = 'could not open live feed — reconnecting in 15s';
+    onchainReconnectTimer = setTimeout(connectOnchainFeed, 15000);
+    return;
+  }
+
+  ws.onopen = () => {
+    statusEl.textContent = 'connected — listening for new pump.fun launches…';
+    try{ ws.send(JSON.stringify({ method: 'subscribeNewToken' })); }catch(e){}
+  };
+
+  ws.onmessage = (event) => {
+    let data;
+    try{ data = JSON.parse(event.data); }catch(e){ return; }
+    const token = normalizeOnchainToken(data);
+    if(!token) return;
+    onchainTokens.unshift(token);
+    if(onchainTokens.length > ONCHAIN_MAX) onchainTokens.length = ONCHAIN_MAX;
+    renderOnchainList();
+    statusEl.textContent = 'live · last launch seen ' + new Date().toLocaleTimeString();
+  };
+
+  ws.onerror = () => {
+    statusEl.textContent = 'live feed error — the third-party relay may be down';
+  };
+
+  ws.onclose = () => {
+    statusEl.textContent = 'disconnected — reconnecting in 10s…';
+    onchainReconnectTimer = setTimeout(connectOnchainFeed, 10000);
+  };
+}
+
+// Keep displayed ages fresh even between new messages.
+setInterval(() => { if(onchainTokens.length) renderOnchainList(); }, 5000);
+
+connectOnchainFeed();
+
 </script>
 </body>
 </html>
