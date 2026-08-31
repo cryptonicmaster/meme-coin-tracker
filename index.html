@@ -464,27 +464,45 @@ async function loadNewListings(){
     const byChain = {};
     items.forEach(p => { (byChain[p.chainId] = byChain[p.chainId] || []).push(p.tokenAddress); });
 
-    const pairMap = {};
+    const pairMap = {};      // token address -> highest-liquidity pair (for live price/vol/liquidity)
+    const firstSeenMap = {}; // token address -> earliest pairCreatedAt seen across ALL its pools
     await Promise.all(Object.entries(byChain).map(async ([chainId, addresses]) => {
       try{
         const addrList = addresses.slice(0,30).join(',');
         const res = await fetchJSON(`${DEX}/tokens/v1/${chainId}/${addrList}`);
         const pairs = (res && res.pairs) || (Array.isArray(res) ? res : []) || [];
         pairs.forEach(pair => {
-          const addr = (pair.baseToken && pair.baseToken.address || '').toLowerCase();
-          if(!addr) return;
-          const existing = pairMap[addr];
-          if(!existing || (pair.liquidity?.usd||0) > (existing.liquidity?.usd||0)) pairMap[addr] = pair;
+          // A token can appear as either side of a pool, so check both.
+          [pair.baseToken?.address, pair.quoteToken?.address].forEach(rawAddr => {
+            const addr = (rawAddr || '').toLowerCase();
+            if(!addr) return;
+
+            // Keep the highest-liquidity pair for live stats — most reliable current price/volume.
+            if((pair.baseToken?.address||'').toLowerCase() === addr){
+              const existing = pairMap[addr];
+              if(!existing || (pair.liquidity?.usd||0) > (existing.liquidity?.usd||0)) pairMap[addr] = pair;
+            }
+
+            // Track the EARLIEST pool creation time — a token graduating from a bonding
+            // curve (e.g. pump.fun) to a DEX pool gets a fresh pairCreatedAt on the new
+            // pool, which understates true launch time if we only look at one pair.
+            if(pair.pairCreatedAt){
+              const prevFirst = firstSeenMap[addr];
+              if(!prevFirst || pair.pairCreatedAt < prevFirst) firstSeenMap[addr] = pair.pairCreatedAt;
+            }
+          });
         });
       }catch(e){ /* skip this chain's batch, keep the rest */ }
     }));
 
     const allRows = items.map(p => {
-      const pair = pairMap[(p.tokenAddress||'').toLowerCase()];
+      const addr = (p.tokenAddress||'').toLowerCase();
+      const pair = pairMap[addr];
       const liq = pair && pair.liquidity ? pair.liquidity.usd : null;
       const vol = pair && pair.volume ? pair.volume.h24 : null;
       const chg = pair && pair.priceChange ? pair.priceChange.h24 : null;
-      return { p, pair, score: potentialScore(p, pair), liq, vol, chg };
+      const firstSeenAt = firstSeenMap[addr] || (pair && pair.pairCreatedAt) || null;
+      return { p, pair, score: potentialScore(p, pair), liq, vol, chg, firstSeenAt };
     });
 
     const totalCount = allRows.length;
@@ -511,17 +529,17 @@ function renderListings(){
 
   const sorted = [...listingsCache].sort((a, b) => {
     if(sortMode === 'newest'){
-      const at = a.pair && a.pair.pairCreatedAt || 0;
-      const bt = b.pair && b.pair.pairCreatedAt || 0;
+      const at = a.firstSeenAt || 0;
+      const bt = b.firstSeenAt || 0;
       return bt - at;
     }
     return b.score - a.score;
   });
 
-  el.innerHTML = sorted.map(({p, pair, score, liq, vol, chg}, i) => {
+  el.innerHTML = sorted.map(({p, pair, score, liq, vol, chg, firstSeenAt}, i) => {
     const name = (pair && pair.baseToken && pair.baseToken.name) || p.header || 'Unknown token';
     const symbol = pair && pair.baseToken && pair.baseToken.symbol;
-    const age = pair && pair.pairCreatedAt ? timeAgo(new Date(pair.pairCreatedAt)) : 'age unknown';
+    const age = firstSeenAt ? timeAgo(new Date(firstSeenAt)) : 'age unknown';
     const hasSocials = (p.links || []).length > 0;
     const statBits = [
       liq != null ? 'Liq ' + fmtCompact(liq) : null,
