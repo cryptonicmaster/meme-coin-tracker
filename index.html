@@ -231,14 +231,14 @@
     <section>
       <div class="section-head" style="flex-wrap:wrap;">
         <h2>🔴 LIVE ON-CHAIN LAUNCHES</h2>
-        <p style="flex:1 1 auto;">Solana / pump.fun tokens, streamed the moment they're created — before any DEX profile exists</p>
+        <p style="flex:1 1 auto;">Solana / pump.fun tokens — surfaced once they show real early trading activity, not the instant they're minted</p>
       </div>
       <div class="disclaimer" style="margin-bottom:10px; border-color:var(--danger);">
-        <b style="color:var(--danger);">Extreme risk — read before using this section.</b> These tokens can be seconds old with zero trading history and no track record whatsoever. Most fail or are outright scams. The <b>Early Signal Score</b> here is far weaker than the Potential Score above — it's based only on whether the creator filled in socials and put any of their own money in. Each token is also cross-checked against <b>RugCheck</b>, a free Solana contract scanner — tokens explicitly flagged as already rugged, or with both mint and freeze authority still active (the two most common rug mechanisms), are filtered out automatically. A "safety score" passing this check is <b>not</b> a legitimacy guarantee — it only means the contract lacks those specific mechanisms; a clean contract can still be abandoned or fail. Very new tokens often show "checking safety…" briefly since they haven't been indexed yet. This feed also runs on <b>unofficial third-party services</b>, not pump.fun or RugCheck's own apps — either can go down or misbehave without notice.
+        <b style="color:var(--danger);">Extreme risk — read before using this section.</b> The vast majority of pump.fun mints get zero real buyers and die within seconds, so each token is held quietly for about 90 seconds and only shown here if it clears a minimum bar of real activity (buyer count, volume, liquidity) — not just having been created. Clearing that bar is still <b>not</b> a safety or quality guarantee, just evidence some real trading happened. Each token is also cross-checked against <b>RugCheck</b>, a free Solana contract scanner — tokens explicitly flagged as already rugged, or with both mint and freeze authority still active, are filtered out automatically; a passing safety score only means those specific mechanisms are absent, not that the project is legitimate. This runs on <b>unofficial third-party services</b> (not pump.fun, DexScreener, or RugCheck's own apps) — any of them can go down or misbehave without notice.
       </div>
       <div id="onchainStatus" class="social-note mono" style="margin-bottom:6px;">connecting to live feed…</div>
       <div id="onchainHiddenNote" class="social-note" style="margin-bottom:10px;"></div>
-      <div id="onchainList"><div class="loading mono">waiting for the first live launch…</div></div>
+      <div id="onchainList"><div class="loading mono">waiting for a launch to clear the early-momentum bar…</div></div>
     </section>
   </main>
 
@@ -633,9 +633,21 @@ const ONCHAIN_WS_URL = 'wss://pumpdev.io/ws';
 const ONCHAIN_MAX = 20;
 const SOLANA_ADDR_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/; // base58, no 0/O/I/l
 
+// Momentum filter: instead of showing a token the instant it mints (mostly
+// noise — the vast majority of pump.fun mints get zero real buyers), each
+// token sits in a quiet "incubation" window and only gets surfaced if it
+// shows real early trading activity by the time the window ends.
+const INCUBATION_MS = 90 * 1000;        // how long to wait before the first check
+const INCUBATION_RETRY_MS = 60 * 1000;  // extra grace period if no data exists yet
+const ONCHAIN_MIN_LIQUIDITY_USD = 500;
+const ONCHAIN_MIN_VOLUME_H1 = 300;
+const ONCHAIN_MIN_BUYS_H1 = 10;
+
 let onchainTokens = [];
 let onchainReconnectTimer = null;
 let onchainHiddenUnsafeCount = 0;
+let incubating = new Map(); // mint -> { token, checkAt, retried }
+let onchainDroppedCount = 0; // failed the momentum bar (or never got any data)
 
 function escapeHtml(str){
   const d = document.createElement('div');
@@ -725,19 +737,88 @@ function processRugcheckQueue(){
 }
 setInterval(processRugcheckQueue, RUGCHECK_INTERVAL_MS);
 
+/* --- Momentum incubation queue ----------------------------------------
+   Checks real trading stats (via DexScreener) for tokens once their
+   incubation window elapses, and only promotes them to the visible list
+   if they clear a minimum real-activity bar.
+------------------------------------------------------------------------ */
+function evaluateMomentum(pair){
+  if(!pair) return false;
+  const liq = pair.liquidity?.usd || 0;
+  const volH1 = pair.volume?.h1 || 0;
+  const buysH1 = (pair.txns && pair.txns.h1 && pair.txns.h1.buys) || 0;
+  return liq >= ONCHAIN_MIN_LIQUIDITY_USD && volH1 >= ONCHAIN_MIN_VOLUME_H1 && buysH1 >= ONCHAIN_MIN_BUYS_H1;
+}
+
+function promoteOnchainToken(token, pair){
+  token.liq = pair && pair.liquidity ? pair.liquidity.usd : null;
+  token.volH1 = pair && pair.volume ? pair.volume.h1 : null;
+  token.buysH1 = pair && pair.txns && pair.txns.h1 ? pair.txns.h1.buys : null;
+  onchainTokens.unshift(token);
+  if(onchainTokens.length > ONCHAIN_MAX) onchainTokens.length = ONCHAIN_MAX;
+  enqueueSafetyCheck(token.mint);
+  renderOnchainList();
+}
+
+async function processIncubationQueue(){
+  const now = Date.now();
+  const ready = [];
+  incubating.forEach((entry, mint) => { if(entry.checkAt <= now) ready.push(mint); });
+  if(!ready.length) return;
+
+  try{
+    const addrList = ready.slice(0,30).join(',');
+    const res = await fetchJSON(`${DEX}/tokens/v1/solana/${addrList}`);
+    const pairs = (res && res.pairs) || (Array.isArray(res) ? res : []) || [];
+    const readySet = new Set(ready.map(a => a.toLowerCase()));
+    const byMint = {};
+    pairs.forEach(pair => {
+      [pair.baseToken?.address, pair.quoteToken?.address].forEach(rawAddr => {
+        const addr = (rawAddr || '').toLowerCase();
+        if(!readySet.has(addr)) return;
+        const existing = byMint[addr];
+        if(!existing || (pair.liquidity?.usd||0) > (existing.liquidity?.usd||0)) byMint[addr] = pair;
+      });
+    });
+
+    ready.forEach(mint => {
+      const entry = incubating.get(mint);
+      if(!entry) return;
+      const pair = byMint[mint.toLowerCase()];
+
+      if(evaluateMomentum(pair)){
+        promoteOnchainToken(entry.token, pair);
+        incubating.delete(mint);
+      }else if(!pair && !entry.retried){
+        // No trading data found at all yet — give it one more short grace window
+        // rather than assuming it's dead (the relay/DexScreener may just be behind).
+        entry.retried = true;
+        entry.checkAt = Date.now() + INCUBATION_RETRY_MS;
+      }else{
+        onchainDroppedCount++;
+        incubating.delete(mint);
+        renderOnchainList();
+      }
+    });
+  }catch(e){ /* leave the batch in the queue, retry on the next tick */ }
+}
+setInterval(processIncubationQueue, 10000);
+
 function renderOnchainList(){
   const el = document.getElementById('onchainList');
   const noteEl = document.getElementById('onchainHiddenNote');
 
   const visible = onchainTokens.filter(t => !(t.safety && t.safety.status === 'checked' && t.safety.failed));
   if(noteEl){
-    noteEl.textContent = onchainHiddenUnsafeCount > 0
-      ? `${onchainHiddenUnsafeCount} filtered — failed automated safety check (flagged as rugged, or mint + freeze authority both still active)`
-      : '';
+    const parts = [];
+    if(incubating.size > 0) parts.push(`${incubating.size} incubating — watching for early trading activity`);
+    if(onchainDroppedCount > 0) parts.push(`${onchainDroppedCount} dropped — didn't show real momentum in ${INCUBATION_MS/60000}min`);
+    if(onchainHiddenUnsafeCount > 0) parts.push(`${onchainHiddenUnsafeCount} filtered — failed safety check`);
+    noteEl.textContent = parts.join(' · ');
   }
 
   if(!visible.length){
-    el.innerHTML = '<div class="loading mono">waiting for the first live launch…</div>';
+    el.innerHTML = '<div class="loading mono">waiting for a launch to clear the early-momentum bar…</div>';
     return;
   }
   el.innerHTML = visible.map(t => {
@@ -757,6 +838,12 @@ function renderOnchainList(){
       safetyFlag = `<span class="flag ok">${label}</span>`;
     }
 
+    const statBits = [
+      t.liq != null ? 'Liq ' + fmtCompact(t.liq) : null,
+      t.volH1 != null ? 'Vol(1h) ' + fmtCompact(t.volH1) : null,
+      t.buysH1 != null ? t.buysH1 + ' buys(1h)' : null,
+    ].filter(Boolean).join(' · ');
+
     return `
       <div class="listing">
         <span class="badge live">LIVE</span>
@@ -766,9 +853,10 @@ function renderOnchainList(){
           <div class="meter-label"><span>EARLY SIGNAL</span><span>${t.score}/100</span></div>
           <div class="meter social">${meterHtml(t.score)}</div>
         </div>
+        <span class="lstats">${statBits}</span>
         <div class="flags">
           <span class="flag ${t.hasSocials ? 'ok' : 'warn'}">${t.hasSocials ? '✓ Socials linked' : '✕ No socials'}</span>
-          <span class="flag warn">⚠ Zero track record</span>
+          <span class="flag ok">✓ Cleared early momentum bar</span>
           ${safetyFlag}
         </div>
         ${link}
@@ -798,11 +886,10 @@ function connectOnchainFeed(){
     try{ data = JSON.parse(event.data); }catch(e){ return; }
     const token = normalizeOnchainToken(data);
     if(!token) return;
-    onchainTokens.unshift(token);
-    if(onchainTokens.length > ONCHAIN_MAX) onchainTokens.length = ONCHAIN_MAX;
-    enqueueSafetyCheck(token.mint);
-    renderOnchainList();
-    statusEl.textContent = 'live · last launch seen ' + new Date().toLocaleTimeString();
+    if(incubating.has(token.mint) || onchainTokens.find(t => t.mint === token.mint)) return; // dedupe
+
+    incubating.set(token.mint, { token, checkAt: Date.now() + INCUBATION_MS, retried: false });
+    statusEl.textContent = `live · watching ${incubating.size} incubating token(s)…`;
   };
 
   ws.onerror = () => {
