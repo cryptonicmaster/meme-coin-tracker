@@ -234,9 +234,10 @@
         <p style="flex:1 1 auto;">Solana / pump.fun tokens, streamed the moment they're created — before any DEX profile exists</p>
       </div>
       <div class="disclaimer" style="margin-bottom:10px; border-color:var(--danger);">
-        <b style="color:var(--danger);">Extreme risk — read before using this section.</b> These tokens can be seconds old with zero trading history, zero liquidity checks, and no track record whatsoever. Most fail or are outright scams. The <b>Early Signal Score</b> here is far weaker than the Potential Score above — it's based only on whether the creator filled in socials and put any of their own money in, not on any real trading data (there isn't any yet). This feed also runs on an <b>unofficial third-party relay</b>, not pump.fun itself — it can go down or misbehave without notice.
+        <b style="color:var(--danger);">Extreme risk — read before using this section.</b> These tokens can be seconds old with zero trading history and no track record whatsoever. Most fail or are outright scams. The <b>Early Signal Score</b> here is far weaker than the Potential Score above — it's based only on whether the creator filled in socials and put any of their own money in. Each token is also cross-checked against <b>RugCheck</b>, a free Solana contract scanner — tokens explicitly flagged as already rugged, or with both mint and freeze authority still active (the two most common rug mechanisms), are filtered out automatically. A "safety score" passing this check is <b>not</b> a legitimacy guarantee — it only means the contract lacks those specific mechanisms; a clean contract can still be abandoned or fail. Very new tokens often show "checking safety…" briefly since they haven't been indexed yet. This feed also runs on <b>unofficial third-party services</b>, not pump.fun or RugCheck's own apps — either can go down or misbehave without notice.
       </div>
-      <div id="onchainStatus" class="social-note mono" style="margin-bottom:10px;">connecting to live feed…</div>
+      <div id="onchainStatus" class="social-note mono" style="margin-bottom:6px;">connecting to live feed…</div>
+      <div id="onchainHiddenNote" class="social-note" style="margin-bottom:10px;"></div>
       <div id="onchainList"><div class="loading mono">waiting for the first live launch…</div></div>
     </section>
   </main>
@@ -634,6 +635,7 @@ const SOLANA_ADDR_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/; // base58, no 0/O/I/l
 
 let onchainTokens = [];
 let onchainReconnectTimer = null;
+let onchainHiddenUnsafeCount = 0;
 
 function escapeHtml(str){
   const d = document.createElement('div');
@@ -665,20 +667,96 @@ function normalizeOnchainToken(data){
   score += Math.min(30, devBuySol * 6);
   score = Math.max(0, Math.min(100, Math.round(score)));
 
-  return { mint: String(mint), name, symbol, hasSocials, devBuySol, score, ts: Date.now() };
+  return { mint: String(mint), name, symbol, hasSocials, devBuySol, score, ts: Date.now(), safety: { status: 'pending' } };
 }
+
+/* --- RugCheck safety layer -------------------------------------------
+   Cross-checks each live token against RugCheck's free (no-key) report
+   endpoint: reads the actual contract for mint/freeze authority, whether
+   it's already been flagged as rugged, and holder/LP risk flags. This is
+   real on-chain contract data, not a marketing-effort signal like socials.
+   Throttled to one request every 3s to stay well under any rate limit.
+   Brand-new tokens often won't be indexed yet — that shows as "pending",
+   not as a failure, and isn't held against the token.
+------------------------------------------------------------------------ */
+const RUGCHECK_INTERVAL_MS = 3000;
+let rugcheckQueue = [];
+let rugcheckQueued = new Set();
+
+function enqueueSafetyCheck(mint){
+  if(rugcheckQueued.has(mint)) return;
+  rugcheckQueued.add(mint);
+  rugcheckQueue.push(mint);
+}
+
+async function checkTokenSafety(mint){
+  try{
+    const data = await fetchJSON(`https://api.rugcheck.xyz/v1/tokens/${mint}/report/summary`);
+    const risks = Array.isArray(data.risks) ? data.risks : [];
+    const dangerNames = risks.filter(r => r && (r.level === 'danger' || r.level === 'high')).map(r => r.name || 'Risk flag');
+    const mintAuthorityActive = !!(data.mintAuthority || (data.token && data.token.mintAuthority));
+    const freezeAuthorityActive = !!(data.freezeAuthority || (data.token && data.token.freezeAuthority));
+    const rugged = !!data.rugged;
+    const riskScore = typeof data.score_normalised === 'number' ? data.score_normalised
+      : (typeof data.score === 'number' ? Math.min(100, data.score) : null);
+
+    // Fails outright only on strong, explicit signals — not on missing data.
+    const failed = rugged || (mintAuthorityActive && freezeAuthorityActive);
+
+    return {
+      status: 'checked', failed, rugged, mintAuthorityActive, freezeAuthorityActive,
+      riskScore, dangerNames,
+    };
+  }catch(e){
+    return { status: 'unavailable' };
+  }
+}
+
+function processRugcheckQueue(){
+  if(!rugcheckQueue.length) return;
+  const mint = rugcheckQueue.shift();
+  checkTokenSafety(mint).then(result => {
+    const token = onchainTokens.find(t => t.mint === mint);
+    if(!token) return; // scrolled out of the capped list already
+    token.safety = result;
+    if(result.status === 'checked' && result.failed) onchainHiddenUnsafeCount++;
+    renderOnchainList();
+  });
+}
+setInterval(processRugcheckQueue, RUGCHECK_INTERVAL_MS);
 
 function renderOnchainList(){
   const el = document.getElementById('onchainList');
-  if(!onchainTokens.length){
+  const noteEl = document.getElementById('onchainHiddenNote');
+
+  const visible = onchainTokens.filter(t => !(t.safety && t.safety.status === 'checked' && t.safety.failed));
+  if(noteEl){
+    noteEl.textContent = onchainHiddenUnsafeCount > 0
+      ? `${onchainHiddenUnsafeCount} filtered — failed automated safety check (flagged as rugged, or mint + freeze authority both still active)`
+      : '';
+  }
+
+  if(!visible.length){
     el.innerHTML = '<div class="loading mono">waiting for the first live launch…</div>';
     return;
   }
-  el.innerHTML = onchainTokens.map(t => {
+  el.innerHTML = visible.map(t => {
     const validMint = SOLANA_ADDR_RE.test(t.mint);
     const link = validMint
       ? `<a class="lsocial" href="https://pump.fun/${encodeURIComponent(t.mint)}" target="_blank" rel="noopener">view →</a>`
       : '';
+
+    const s = t.safety || { status: 'pending' };
+    let safetyFlag;
+    if(s.status === 'pending'){
+      safetyFlag = `<span class="flag mono">🛡 checking safety…</span>`;
+    }else if(s.status === 'unavailable'){
+      safetyFlag = `<span class="flag mono">🛡 safety check unavailable</span>`;
+    }else{
+      const label = s.riskScore != null ? `✓ Safety score ${100 - s.riskScore}/100` : '✓ No critical flags found';
+      safetyFlag = `<span class="flag ok">${label}</span>`;
+    }
+
     return `
       <div class="listing">
         <span class="badge live">LIVE</span>
@@ -691,6 +769,7 @@ function renderOnchainList(){
         <div class="flags">
           <span class="flag ${t.hasSocials ? 'ok' : 'warn'}">${t.hasSocials ? '✓ Socials linked' : '✕ No socials'}</span>
           <span class="flag warn">⚠ Zero track record</span>
+          ${safetyFlag}
         </div>
         ${link}
       </div>
@@ -721,6 +800,7 @@ function connectOnchainFeed(){
     if(!token) return;
     onchainTokens.unshift(token);
     if(onchainTokens.length > ONCHAIN_MAX) onchainTokens.length = ONCHAIN_MAX;
+    enqueueSafetyCheck(token.mint);
     renderOnchainList();
     statusEl.textContent = 'live · last launch seen ' + new Date().toLocaleTimeString();
   };
