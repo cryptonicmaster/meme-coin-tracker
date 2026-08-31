@@ -464,41 +464,27 @@ async function loadNewListings(){
     const byChain = {};
     items.forEach(p => { (byChain[p.chainId] = byChain[p.chainId] || []).push(p.tokenAddress); });
 
-    const trackedAddrs = new Set(items.map(p => (p.tokenAddress||'').toLowerCase()));
-    const pairsByAddr = {}; // token address -> all pairs it participates in (either side)
-
+    const pairMap = {};
     await Promise.all(Object.entries(byChain).map(async ([chainId, addresses]) => {
       try{
         const addrList = addresses.slice(0,30).join(',');
         const res = await fetchJSON(`${DEX}/tokens/v1/${chainId}/${addrList}`);
         const pairs = (res && res.pairs) || (Array.isArray(res) ? res : []) || [];
         pairs.forEach(pair => {
-          // A tracked token can be listed as either the base or quote side of a pool —
-          // only file this pair under addresses we're actually tracking.
-          [pair.baseToken?.address, pair.quoteToken?.address].forEach(rawAddr => {
-            const addr = (rawAddr || '').toLowerCase();
-            if(!addr || !trackedAddrs.has(addr)) return;
-            (pairsByAddr[addr] = pairsByAddr[addr] || []).push(pair);
-          });
+          const addr = (pair.baseToken && pair.baseToken.address || '').toLowerCase();
+          if(!addr) return;
+          const existing = pairMap[addr];
+          if(!existing || (pair.liquidity?.usd||0) > (existing.liquidity?.usd||0)) pairMap[addr] = pair;
         });
       }catch(e){ /* skip this chain's batch, keep the rest */ }
     }));
 
     const allRows = items.map(p => {
-      const addr = (p.tokenAddress||'').toLowerCase();
-      const tokenPairs = pairsByAddr[addr] || [];
-      // Best pair for live stats = highest liquidity, regardless of which side it's on.
-      const pair = tokenPairs.reduce((best, cur) =>
-        (!best || (cur.liquidity?.usd||0) > (best.liquidity?.usd||0)) ? cur : best, null);
-      // True launch time = EARLIEST pool creation across every pool this token has ever
-      // had — a bonding-curve graduation (pump.fun -> DEX) creates a new pair with a
-      // fresh timestamp, which understates true age if we only look at one pair.
-      const firstSeenAt = tokenPairs.reduce((earliest, cur) =>
-        cur.pairCreatedAt && (!earliest || cur.pairCreatedAt < earliest) ? cur.pairCreatedAt : earliest, null);
+      const pair = pairMap[(p.tokenAddress||'').toLowerCase()];
       const liq = pair && pair.liquidity ? pair.liquidity.usd : null;
       const vol = pair && pair.volume ? pair.volume.h24 : null;
       const chg = pair && pair.priceChange ? pair.priceChange.h24 : null;
-      return { p, pair, score: potentialScore(p, pair), liq, vol, chg, firstSeenAt };
+      return { p, pair, score: potentialScore(p, pair), liq, vol, chg };
     });
 
     const totalCount = allRows.length;
@@ -525,17 +511,17 @@ function renderListings(){
 
   const sorted = [...listingsCache].sort((a, b) => {
     if(sortMode === 'newest'){
-      const at = a.firstSeenAt || 0;
-      const bt = b.firstSeenAt || 0;
+      const at = a.pair && a.pair.pairCreatedAt || 0;
+      const bt = b.pair && b.pair.pairCreatedAt || 0;
       return bt - at;
     }
     return b.score - a.score;
   });
 
-  el.innerHTML = sorted.map(({p, pair, score, liq, vol, chg, firstSeenAt}, i) => {
+  el.innerHTML = sorted.map(({p, pair, score, liq, vol, chg}, i) => {
     const name = (pair && pair.baseToken && pair.baseToken.name) || p.header || 'Unknown token';
     const symbol = pair && pair.baseToken && pair.baseToken.symbol;
-    const age = firstSeenAt ? timeAgo(new Date(firstSeenAt)) : 'age unknown';
+    const age = pair && pair.pairCreatedAt ? timeAgo(new Date(pair.pairCreatedAt)) : 'age unknown';
     const hasSocials = (p.links || []).length > 0;
     const statBits = [
       liq != null ? 'Liq ' + fmtCompact(liq) : null,
