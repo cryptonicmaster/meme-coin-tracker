@@ -234,7 +234,7 @@
         <p style="flex:1 1 auto;">Solana / pump.fun tokens — surfaced once they show real early trading activity, not the instant they're minted</p>
       </div>
       <div class="disclaimer" style="margin-bottom:10px; border-color:var(--danger);">
-        <b style="color:var(--danger);">Extreme risk — read before using this section.</b> The vast majority of pump.fun mints get zero real buyers and die within seconds, so each token is held quietly for about 90 seconds and only shown here if it clears a minimum bar of real activity (buyer count, volume, liquidity) — not just having been created. Clearing that bar is still <b>not</b> a safety or quality guarantee, just evidence some real trading happened. Each token is also cross-checked against <b>RugCheck</b>, a free Solana contract scanner — tokens explicitly flagged as already rugged, or with both mint and freeze authority still active, are filtered out automatically; a passing safety score only means those specific mechanisms are absent, not that the project is legitimate. This runs on <b>unofficial third-party services</b> (not pump.fun, DexScreener, or RugCheck's own apps) — any of them can go down or misbehave without notice.
+        <b style="color:var(--danger);">Extreme risk — read before using this section.</b> The vast majority of pump.fun mints get zero real buyers and die within seconds, so each token is held quietly for about 90 seconds and only shown here if it clears a minimum bar of real activity: at least $5,000 in liquidity, plus real 1h volume and buy count. Clearing that bar is still <b>not</b> a safety or quality guarantee, just evidence some real trading happened. Each token is also cross-checked against <b>RugCheck</b>, a free Solana contract scanner, and filtered out automatically if: it's explicitly flagged as already rugged; <b>either</b> mint or freeze authority is still active; the liquidity pool isn't confirmed locked/burned; or the top 10 holders control more than 20% of supply. Passing means those specific checks came back clean — <b>not</b> that the project is legitimate or will succeed, and LP-lock/holder data isn't always available to verify (shown as "unverified" when so, not held against the token). This runs on <b>unofficial third-party services</b> (not pump.fun, DexScreener, or RugCheck's own apps) — any of them can go down or misbehave without notice.
       </div>
       <div id="onchainStatus" class="social-note mono" style="margin-bottom:6px;">connecting to live feed…</div>
       <div id="onchainHiddenNote" class="social-note" style="margin-bottom:10px;"></div>
@@ -639,7 +639,7 @@ const SOLANA_ADDR_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/; // base58, no 0/O/I/l
 // shows real early trading activity by the time the window ends.
 const INCUBATION_MS = 90 * 1000;        // how long to wait before the first check
 const INCUBATION_RETRY_MS = 60 * 1000;  // extra grace period if no data exists yet
-const ONCHAIN_MIN_LIQUIDITY_USD = 500;
+const ONCHAIN_MIN_LIQUIDITY_USD = 5000; // was $500 — raised to match recommended $5k-$10k minimum
 const ONCHAIN_MIN_VOLUME_H1 = 300;
 const ONCHAIN_MIN_BUYS_H1 = 10;
 
@@ -712,11 +712,37 @@ async function checkTokenSafety(mint){
     const riskScore = typeof data.score_normalised === 'number' ? data.score_normalised
       : (typeof data.score === 'number' ? Math.min(100, data.score) : null);
 
-    // Fails outright only on strong, explicit signals — not on missing data.
-    const failed = rugged || (mintAuthorityActive && freezeAuthorityActive);
+    // LP lock/burn check — prefer an explicit locked-percentage field if present,
+    // otherwise fall back to scanning named risk flags for an unlocked-liquidity warning.
+    let lpLockedPct = null;
+    if(Array.isArray(data.markets)){
+      const pcts = data.markets
+        .map(m => m && m.lp && typeof m.lp.lpLockedPct === 'number' ? m.lp.lpLockedPct : null)
+        .filter(v => v != null);
+      if(pcts.length) lpLockedPct = Math.max(...pcts);
+    }
+    const lpRiskFlag = risks.some(r => r && /liquidity.*lock|lp.*lock|liquidity.*burn|unlocked liquidity/i.test(r.name||'') && (r.level==='danger'||r.level==='high'));
+    const lpConfirmedUnlocked = (lpLockedPct != null && lpLockedPct < 50) || lpRiskFlag;
+
+    // Holder concentration — sum top 10 non-LP holders if the field is present,
+    // otherwise fall back to a named risk flag for whale/concentration warnings.
+    let top10Pct = null;
+    if(Array.isArray(data.topHolders)){
+      const relevant = data.topHolders.filter(h => h && !h.isLp).slice(0,10);
+      if(relevant.length) top10Pct = relevant.reduce((sum,h) => sum + (typeof h.pct === 'number' ? h.pct : 0), 0);
+    }
+    const concentrationRiskFlag = risks.some(r => r && /top.*holder|concentration|whale/i.test(r.name||'') && (r.level==='danger'||r.level==='high'));
+    const concentrationTooHigh = (top10Pct != null && top10Pct > 20) || concentrationRiskFlag;
+
+    // Stricter than before: EITHER mint or freeze authority still active now fails
+    // (previously required both — a real gap this update closes), plus LP-unlock
+    // and holder-concentration signals. Still only fails on explicit signals, not
+    // on data simply being missing/unindexed.
+    const failed = rugged || mintAuthorityActive || freezeAuthorityActive || lpConfirmedUnlocked || concentrationTooHigh;
 
     return {
       status: 'checked', failed, rugged, mintAuthorityActive, freezeAuthorityActive,
+      lpLockedPct, lpConfirmedUnlocked, top10Pct, concentrationTooHigh,
       riskScore, dangerNames,
     };
   }catch(e){
@@ -834,8 +860,17 @@ function renderOnchainList(){
     }else if(s.status === 'unavailable'){
       safetyFlag = `<span class="flag mono">🛡 safety check unavailable</span>`;
     }else{
-      const label = s.riskScore != null ? `✓ Safety score ${100 - s.riskScore}/100` : '✓ No critical flags found';
-      safetyFlag = `<span class="flag ok">${label}</span>`;
+      // Only tokens that passed all checks are ever shown here, so these are
+      // all "good" — but shown individually rather than one blanket message,
+      // since LP-lock and holder data aren't always available to verify.
+      const bits = [`<span class="flag ok">✓ Mint/freeze revoked</span>`];
+      bits.push(s.lpLockedPct != null
+        ? `<span class="flag ok">✓ LP locked ${Math.round(s.lpLockedPct)}%</span>`
+        : `<span class="flag mono">🛡 LP lock: unverified</span>`);
+      bits.push(s.top10Pct != null
+        ? `<span class="flag ok">✓ Top 10 holders ${s.top10Pct.toFixed(1)}%</span>`
+        : `<span class="flag mono">🛡 holder data: unverified</span>`);
+      safetyFlag = bits.join('');
     }
 
     const statBits = [
