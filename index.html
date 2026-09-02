@@ -240,6 +240,18 @@
       <div id="onchainHiddenNote" class="social-note" style="margin-bottom:10px;"></div>
       <div id="onchainList"><div class="loading mono">waiting for a launch to clear the early-momentum bar…</div></div>
     </section>
+
+    <section>
+      <div class="section-head" style="flex-wrap:wrap;">
+        <h2>🧠 GMGN SMART MONEY SIGNALS</h2>
+        <p style="flex:1 1 auto;">Solana bonding-curve tokens with above-average smart-money wallet activity, via GMGN</p>
+      </div>
+      <div class="disclaimer" style="margin-bottom:10px;">
+        <b>What this is:</b> a periodic snapshot (updated roughly every 10 minutes by a scheduled server-side job, not live) of tokens GMGN's own <b>smart-money filter preset</b> flags as having above-average activity from wallets it tracks as historically profitable. "Smart money" is GMGN's own wallet-labeling system — <b>not</b> a guarantee those wallets are right this time, and past performance of a wallet doesn't predict its next trade. This runs through your own GMGN API key on a private server-side job — the key itself never touches this page or any visitor's browser.
+      </div>
+      <div id="gmgnStatus" class="social-note mono" style="margin-bottom:10px;">loading signals…</div>
+      <div id="gmgnList"><div class="loading mono">loading GMGN smart-money data…</div></div>
+    </section>
   </main>
 
   <footer>
@@ -941,6 +953,85 @@ function connectOnchainFeed(){
 setInterval(() => { if(onchainTokens.length) renderOnchainList(); }, 5000);
 
 connectOnchainFeed();
+
+/* ---------------------------------------------------------------------
+   GMGN SMART MONEY SIGNALS
+   Reads a static JSON snapshot published by a scheduled GitHub Action
+   (.github/workflows/gmgn-signals.yml) — the GMGN API key never reaches
+   this page. Field names below are best-effort guesses based on the
+   official CLI's flag names (which typically mirror the underlying JSON
+   fields) but weren't independently confirmed against live output, so
+   multiple plausible paths are tried per field before giving up on it.
+--------------------------------------------------------------------- */
+function getField(obj, paths){
+  for(const p of paths){
+    const v = p.split('.').reduce((o,k) => (o && o[k] != null ? o[k] : undefined), obj);
+    if(v != null) return v;
+  }
+  return null;
+}
+
+async function loadGmgnSignals(){
+  const statusEl = document.getElementById('gmgnStatus');
+  const el = document.getElementById('gmgnList');
+  try{
+    const res = await fetchJSON('./data/gmgn-combined.json');
+    const trenches = Array.isArray(res.trenches) ? res.trenches : [];
+
+    if(!res.updatedAt){
+      statusEl.textContent = 'waiting for the first scheduled sync — fills in automatically once the GitHub Action has run once';
+      el.innerHTML = '<div class="loading mono">no data yet — check back shortly after setup</div>';
+      return;
+    }
+    statusEl.textContent = 'last updated ' + new Date(res.updatedAt).toLocaleTimeString() + (res.source ? ' · ' + res.source : '');
+
+    if(!trenches.length){
+      el.innerHTML = '<div class="empty">No tokens currently match GMGN\'s smart-money preset.</div>';
+      return;
+    }
+
+    el.innerHTML = trenches.slice(0, 20).map(t => {
+      const symbol = getField(t, ['symbol','token_symbol','token.symbol']) || '';
+      const name = getField(t, ['name','token_name','token.name']) || symbol || 'Unknown token';
+      const mcap = getField(t, ['usd_market_cap','market_cap','marketcap']);
+      const holderCount = getField(t, ['holder_count']);
+      const progress = getField(t, ['progress']);
+      const smartCount = getField(t, ['smart_degen_count']);
+      const renownedCount = getField(t, ['renowned_count']);
+      const category = t._category || null;
+      const mint = getField(t, ['address','token_address','mint','token.address','token.mint']);
+      const validMint = mint && SOLANA_ADDR_RE.test(String(mint));
+      const link = validMint
+        ? `<a class="lsocial" href="https://pump.fun/${encodeURIComponent(mint)}" target="_blank" rel="noopener">view →</a>`
+        : '';
+
+      const statBits = [
+        mcap != null ? 'MCap ' + fmtCompact(mcap) : null,
+        holderCount != null ? holderCount + ' holders' : null,
+        progress != null ? 'Progress ' + Math.round(progress*100) + '%' : null,
+      ].filter(Boolean).join(' · ');
+
+      return `
+        <div class="listing">
+          ${category ? `<span class="badge">${escapeHtml(String(category).replace(/_/g,' ').toUpperCase())}</span>` : ''}
+          <span class="lname">${escapeHtml(name)}${symbol ? ` <span class="lsym">${escapeHtml(String(symbol).toUpperCase())}</span>` : ''}</span>
+          <span class="lstats">${statBits}</span>
+          <div class="flags">
+            ${smartCount != null ? `<span class="flag ok">✓ ${escapeHtml(String(smartCount))} smart-money holders</span>` : ''}
+            ${renownedCount != null ? `<span class="flag ok">✓ ${escapeHtml(String(renownedCount))} KOL holders</span>` : ''}
+          </div>
+          ${link}
+        </div>
+      `;
+    }).join('');
+  }catch(e){
+    statusEl.textContent = "couldn't load GMGN signals (" + e.message + ")";
+    el.innerHTML = '<div class="err">Check that data/gmgn-combined.json exists in the repo and the GitHub Action has run at least once (see the Actions tab).</div>';
+  }
+}
+
+loadGmgnSignals();
+setInterval(loadGmgnSignals, 5 * 60000); // the underlying data itself only updates ~every 10 min server-side
 
 </script>
 </body>
