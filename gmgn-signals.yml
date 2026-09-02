@@ -1,0 +1,75 @@
+name: GMGN Signals Sync
+
+# Runs on GitHub's servers, never in a visitor's browser. The GMGN API key
+# lives only as a repo secret here — it is never sent to the client, never
+# committed to the repo, and never appears in the published JSON output.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every 10 minutes
+  workflow_dispatch: {}       # allows manually triggering a run from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install GMGN CLI (official, gmgn.ai-maintained)
+        run: npm install -g gmgn-cli
+
+      - name: Fetch smart-money trenches data
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+        run: |
+          mkdir -p data
+          # Solana trenches (new / near-completion / completed bonding-curve tokens),
+          # filtered to GMGN's built-in "smart-money" preset and sorted by smart-money
+          # holder count. Read-only endpoint — only needs GMGN_API_KEY, no private key.
+          gmgn-cli market trenches \
+            --chain sol \
+            --filter-preset smart-money \
+            --sort-by smart_degen_count \
+            --direction desc \
+            --limit 30 \
+            --raw > data/gmgn-trenches-raw.json
+
+          node -e "
+            const fs = require('fs');
+            let raw = {};
+            try {
+              raw = JSON.parse(fs.readFileSync('data/gmgn-trenches-raw.json', 'utf8'));
+            } catch (e) {
+              console.error('Failed to parse GMGN CLI output:', e.message);
+            }
+            // Output shape isn't independently confirmed — handle both a flat
+            // array and a category-keyed object (new_creation/near_completion/completed).
+            let trenches = [];
+            if (Array.isArray(raw)) {
+              trenches = raw;
+            } else if (raw && typeof raw === 'object') {
+              Object.keys(raw).forEach(cat => {
+                const val = raw[cat];
+                const arr = Array.isArray(val) ? val : (val && Array.isArray(val.data) ? val.data : []);
+                arr.forEach(t => trenches.push(Object.assign({}, t, { _category: cat })));
+              });
+            }
+            const out = { updatedAt: new Date().toISOString(), source: 'gmgn-cli market trenches (smart-money preset)', trenches };
+            fs.writeFileSync('data/gmgn-combined.json', JSON.stringify(out));
+          "
+          rm -f data/gmgn-trenches-raw.json
+
+      - name: Commit updated signals data
+        run: |
+          git config user.name "gmgn-signals-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/gmgn-combined.json
+          git diff --quiet --cached || git commit -m "Update GMGN signals [skip ci]"
+          git push
