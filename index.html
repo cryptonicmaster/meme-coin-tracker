@@ -234,7 +234,7 @@
         <p style="flex:1 1 auto;">Solana / pump.fun tokens — surfaced once they show real early trading activity, not the instant they're minted</p>
       </div>
       <div class="disclaimer" style="margin-bottom:10px; border-color:var(--danger);">
-        <b style="color:var(--danger);">Extreme risk — read before using this section.</b> The vast majority of pump.fun mints get zero real buyers and die within seconds, so each token is held quietly for about 90 seconds and only shown here if it clears a minimum bar of real activity: at least $5,000 in liquidity, plus real 1h volume and buy count. Clearing that bar is still <b>not</b> a safety or quality guarantee, just evidence some real trading happened. Each token is also cross-checked against <b>RugCheck</b>, a free Solana contract scanner, and filtered out automatically if: it's explicitly flagged as already rugged; <b>either</b> mint or freeze authority is still active; the liquidity pool isn't confirmed locked/burned; or the top 10 holders control more than 20% of supply. Passing means those specific checks came back clean — <b>not</b> that the project is legitimate or will succeed, and LP-lock/holder data isn't always available to verify (shown as "unverified" when so, not held against the token). This runs on <b>unofficial third-party services</b> (not pump.fun, DexScreener, or RugCheck's own apps) — any of them can go down or misbehave without notice.
+        <b style="color:var(--danger);">Extreme risk — read before using this section.</b> The vast majority of pump.fun mints get zero real buyers and die within seconds, so each token is held quietly for about 90 seconds and only shown here if it clears a minimum bar of real activity: at least $5,000 in liquidity, plus real 1h volume and buy count. Clearing that bar is still <b>not</b> a safety or quality guarantee, just evidence some real trading happened. Each token is also cross-checked against <b>RugCheck</b>, a free Solana contract scanner, and filtered out automatically if any of the following are true: explicitly flagged as already rugged; mint or freeze authority still active; liquidity isn't confirmed locked or burned; top 10 holders control more than 17% of supply; bundled/coordinated sniper buys exceed 10%; insider-linked wallets exceed 10%; the developer wallet holds more than 1%; or the creator has launched 5+ prior tokens (a serial-launcher pattern). Passing means those specific checks came back clean — <b>not</b> that the project is legitimate or will succeed, and any field RugCheck doesn't expose is shown as "unverified" rather than silently assumed safe. Two checks from a common screening checklist — reused/similar token imagery, and fee-to-market-cap ratio — aren't included, since neither is available through any free data source we use. This runs on <b>unofficial third-party services</b> (not pump.fun, DexScreener, or RugCheck's own apps) — any of them can go down or misbehave without notice.
       </div>
       <div id="onchainStatus" class="social-note mono" style="margin-bottom:6px;">connecting to live feed…</div>
       <div id="onchainHiddenNote" class="social-note" style="margin-bottom:10px;"></div>
@@ -717,44 +717,76 @@ async function checkTokenSafety(mint){
   try{
     const data = await fetchJSON(`https://api.rugcheck.xyz/v1/tokens/${mint}/report/summary`);
     const risks = Array.isArray(data.risks) ? data.risks : [];
-    const dangerNames = risks.filter(r => r && (r.level === 'danger' || r.level === 'high')).map(r => r.name || 'Risk flag');
+    const isBadRisk = r => r && (r.level === 'danger' || r.level === 'high');
+    const scanRisks = (re) => risks.some(r => isBadRisk(r) && re.test(r.name||''));
+    const dangerNames = risks.filter(isBadRisk).map(r => r.name || 'Risk flag');
+
     const mintAuthorityActive = !!(data.mintAuthority || (data.token && data.token.mintAuthority));
     const freezeAuthorityActive = !!(data.freezeAuthority || (data.token && data.token.freezeAuthority));
     const rugged = !!data.rugged;
     const riskScore = typeof data.score_normalised === 'number' ? data.score_normalised
       : (typeof data.score === 'number' ? Math.min(100, data.score) : null);
 
-    // LP lock/burn check — prefer an explicit locked-percentage field if present,
-    // otherwise fall back to scanning named risk flags for an unlocked-liquidity warning.
-    let lpLockedPct = null;
+    // LP locked AND LP burned — tracked as two separate numbers, since a
+    // token can be safe via either mechanism (both prevent the dev from
+    // pulling liquidity), matching how RugCheck's own UI shows them.
+    let lpLockedPct = null, lpBurnedPct = null;
     if(Array.isArray(data.markets)){
-      const pcts = data.markets
-        .map(m => m && m.lp && typeof m.lp.lpLockedPct === 'number' ? m.lp.lpLockedPct : null)
-        .filter(v => v != null);
-      if(pcts.length) lpLockedPct = Math.max(...pcts);
+      const lockedVals = data.markets.map(m => m && m.lp && typeof m.lp.lpLockedPct === 'number' ? m.lp.lpLockedPct : null).filter(v => v != null);
+      const burnedVals = data.markets.map(m => m && m.lp && typeof m.lp.lpBurnedPct === 'number' ? m.lp.lpBurnedPct : null).filter(v => v != null);
+      if(lockedVals.length) lpLockedPct = Math.max(...lockedVals);
+      if(burnedVals.length) lpBurnedPct = Math.max(...burnedVals);
     }
-    const lpRiskFlag = risks.some(r => r && /liquidity.*lock|lp.*lock|liquidity.*burn|unlocked liquidity/i.test(r.name||'') && (r.level==='danger'||r.level==='high'));
-    const lpConfirmedUnlocked = (lpLockedPct != null && lpLockedPct < 50) || lpRiskFlag;
+    const lpRiskFlag = scanRisks(/liquidity.*lock|lp.*lock|liquidity.*burn|unlocked liquidity/i);
+    const bestLpProtection = Math.max(lpLockedPct || 0, lpBurnedPct || 0);
+    const lpConfirmedUnlocked = ((lpLockedPct != null || lpBurnedPct != null) && bestLpProtection < 50) || lpRiskFlag;
 
-    // Holder concentration — sum top 10 non-LP holders if the field is present,
-    // otherwise fall back to a named risk flag for whale/concentration warnings.
+    // Holder concentration — top 10 non-LP holders. Tightened from 20% to 17%.
     let top10Pct = null;
     if(Array.isArray(data.topHolders)){
       const relevant = data.topHolders.filter(h => h && !h.isLp).slice(0,10);
       if(relevant.length) top10Pct = relevant.reduce((sum,h) => sum + (typeof h.pct === 'number' ? h.pct : 0), 0);
     }
-    const concentrationRiskFlag = risks.some(r => r && /top.*holder|concentration|whale/i.test(r.name||'') && (r.level==='danger'||r.level==='high'));
-    const concentrationTooHigh = (top10Pct != null && top10Pct > 20) || concentrationRiskFlag;
+    const concentrationRiskFlag = scanRisks(/top.*holder|concentration|whale/i);
+    const concentrationTooHigh = (top10Pct != null && top10Pct > 17) || concentrationRiskFlag;
 
-    // Stricter than before: EITHER mint or freeze authority still active now fails
-    // (previously required both — a real gap this update closes), plus LP-unlock
-    // and holder-concentration signals. Still only fails on explicit signals, not
-    // on data simply being missing/unindexed.
-    const failed = rugged || mintAuthorityActive || freezeAuthorityActive || lpConfirmedUnlocked || concentrationTooHigh;
+    // Bundlers — same-block/coordinated sniper buys at launch.
+    const bundlerPct = typeof data.bundlerRate === 'number' ? data.bundlerRate*100
+      : (typeof data.bundler_rate === 'number' ? data.bundler_rate*100 : null);
+    const bundlerRiskFlag = scanRisks(/bundl/i);
+    const bundlerTooHigh = (bundlerPct != null && bundlerPct > 10) || bundlerRiskFlag;
+
+    // Insiders — wallets connected to the creator/team beyond the obvious dev wallet.
+    const insiderPct = typeof data.insiderRate === 'number' ? data.insiderRate*100
+      : (typeof data.insider_rate === 'number' ? data.insider_rate*100 : null);
+    const insiderRiskFlag = scanRisks(/insider/i);
+    const insiderTooHigh = (insiderPct != null && insiderPct > 10) || insiderRiskFlag;
+
+    // Developer holdings — the creator wallet's own share of supply.
+    const devHoldingsPct = typeof data.creatorBalancePct === 'number' ? data.creatorBalancePct
+      : (typeof data.devHoldingsPct === 'number' ? data.devHoldingsPct : null);
+    const devHoldingsRiskFlag = scanRisks(/developer.*hold|dev.*hold|creator.*balance/i);
+    const devHoldingsTooHigh = (devHoldingsPct != null && devHoldingsPct > 1) || devHoldingsRiskFlag;
+
+    // Developer migrations — how many prior tokens this creator wallet has
+    // launched. A high count suggests a serial "professional" launcher,
+    // which correlates with repeat rug behavior.
+    const devMigrationsCount = typeof data.creatorCreatedCount === 'number' ? data.creatorCreatedCount : null;
+    const devMigrationsRiskFlag = scanRisks(/serial|multiple.*creat|migration/i);
+    const devMigrationsTooHigh = (devMigrationsCount != null && devMigrationsCount >= 5) || devMigrationsRiskFlag;
+
+    // Only fails on explicit signals — never on a field simply being absent/unindexed.
+    const failed = rugged || mintAuthorityActive || freezeAuthorityActive || lpConfirmedUnlocked
+      || concentrationTooHigh || bundlerTooHigh || insiderTooHigh || devHoldingsTooHigh || devMigrationsTooHigh;
 
     return {
       status: 'checked', failed, rugged, mintAuthorityActive, freezeAuthorityActive,
-      lpLockedPct, lpConfirmedUnlocked, top10Pct, concentrationTooHigh,
+      lpLockedPct, lpBurnedPct, lpConfirmedUnlocked,
+      top10Pct, concentrationTooHigh,
+      bundlerPct, bundlerTooHigh,
+      insiderPct, insiderTooHigh,
+      devHoldingsPct, devHoldingsTooHigh,
+      devMigrationsCount, devMigrationsTooHigh,
       riskScore, dangerNames,
     };
   }catch(e){
@@ -874,14 +906,29 @@ function renderOnchainList(){
     }else{
       // Only tokens that passed all checks are ever shown here, so these are
       // all "good" — but shown individually rather than one blanket message,
-      // since LP-lock and holder data aren't always available to verify.
+      // since not every underlying field is always available to verify.
       const bits = [`<span class="flag ok">✓ Mint/freeze revoked</span>`];
       bits.push(s.lpLockedPct != null
         ? `<span class="flag ok">✓ LP locked ${Math.round(s.lpLockedPct)}%</span>`
         : `<span class="flag mono">🛡 LP lock: unverified</span>`);
+      bits.push(s.lpBurnedPct != null
+        ? `<span class="flag ok">✓ LP burned ${Math.round(s.lpBurnedPct)}%</span>`
+        : `<span class="flag mono">🛡 LP burn: unverified</span>`);
       bits.push(s.top10Pct != null
         ? `<span class="flag ok">✓ Top 10 holders ${s.top10Pct.toFixed(1)}%</span>`
         : `<span class="flag mono">🛡 holder data: unverified</span>`);
+      bits.push(s.bundlerPct != null
+        ? `<span class="flag ok">✓ Bundlers ${s.bundlerPct.toFixed(1)}%</span>`
+        : `<span class="flag mono">🛡 bundler data: unverified</span>`);
+      bits.push(s.insiderPct != null
+        ? `<span class="flag ok">✓ Insiders ${s.insiderPct.toFixed(1)}%</span>`
+        : `<span class="flag mono">🛡 insider data: unverified</span>`);
+      bits.push(s.devHoldingsPct != null
+        ? `<span class="flag ok">✓ Dev holds ${s.devHoldingsPct.toFixed(2)}%</span>`
+        : `<span class="flag mono">🛡 dev holdings: unverified</span>`);
+      bits.push(s.devMigrationsCount != null
+        ? `<span class="flag ok">✓ ${s.devMigrationsCount} prior launches</span>`
+        : `<span class="flag mono">🛡 dev history: unverified</span>`);
       safetyFlag = bits.join('');
     }
 
